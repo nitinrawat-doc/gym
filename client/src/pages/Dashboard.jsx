@@ -74,7 +74,7 @@ export default function Dashboard() {
       <div style={glass}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'14px'}}>
           <h2 style={{color:'white',fontWeight:'600',fontSize:'14px',margin:0}}>Recent Members</h2>
-          <button onClick={() => navigate('/members')} style={{background:'none',border:'none',cursor:'pointer',fontSize:'12px',background:'linear-gradient(135deg,#00ff87,#0066ff)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent',fontWeight:'600'}}>View all →</button>
+          <button onClick={() => navigate('/members')} style={{border:'none',cursor:'pointer',fontSize:'12px',background:'linear-gradient(135deg,#00ff87,#0066ff)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent',fontWeight:'600',padding:0}}>View all →</button>
         </div>
         {data.recentMembers.length === 0 ? (
           <p style={{color:'rgba(255,255,255,0.3)',fontSize:'13px',textAlign:'center',padding:'20px 0'}}>No members yet.</p>
