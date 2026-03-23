@@ -16,7 +16,7 @@ app.use('/api/payments',  require('./routes/payments'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n✅ True Fitness server running on http://localhost:${PORT}`);
   console.log('📧 Default login: trainer@truefitness.com / trainer123\n');
 });
