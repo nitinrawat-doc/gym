@@ -1,17 +1,15 @@
 import axios from 'axios';
 
 const api = axios.create({
-  baseURL: '/api'
+  baseURL: 'https://true-fitness-api.onrender.com/api'
 });
 
-// Attach JWT token to every request
 api.interceptors.request.use(config => {
   const token = localStorage.getItem('tf_token');
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
 
-// Auto-logout on 401
 api.interceptors.response.use(
   res => res,
   err => {
