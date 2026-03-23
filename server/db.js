@@ -68,7 +68,7 @@ async function seedTrainer() {
       email: 'trainer@truefitness.com',
       password: bcrypt.hashSync('trainer123', 10)
     });
-    console.log('✅ Default trainer created → trainer@truefitness.com / trainer123');
+    console.log('✅ Default trainer created');
   }
 }
 seedTrainer();
@@ -97,6 +97,9 @@ async function getMemberById(id, trainerId) {
 }
 
 async function createMember(trainerId, data) {
+  // ✅ FIX: joining_date ko next_due_date set karo
+  // Status automatically pending/overdue aayega computeStatus se
+  // Koi payment record nahi banate — member ne abhi fee nahi di
   const member = await Member.create({
     trainer_id:    trainerId,
     name:          data.name.trim(),
@@ -104,7 +107,7 @@ async function createMember(trainerId, data) {
     plan:          data.plan,
     fee_amount:    Number(data.fee_amount),
     joining_date:  data.joining_date,
-    next_due_date: calcNextDueDate(data.joining_date, data.plan)
+    next_due_date: data.joining_date  // ✅ Due date = joining date (turant pending)
   });
   return fmt(member);
 }
@@ -113,7 +116,9 @@ async function updateMember(id, trainerId, data) {
   const old = await Member.findOne({ _id: id, trainer_id: trainerId, active: true });
   if (!old) return null;
   const plan = data.plan || old.plan;
-  const next_due_date = plan !== old.plan ? calcNextDueDate(old.joining_date, plan) : old.next_due_date;
+  const next_due_date = plan !== old.plan
+    ? calcNextDueDate(old.joining_date, plan)
+    : old.next_due_date;
   const updated = await Member.findByIdAndUpdate(id, {
     name:       data.name       || old.name,
     phone:      data.phone      || old.phone,
@@ -137,36 +142,62 @@ async function markPaid(memberId, trainerId) {
   if (!member) return null;
   const today     = new Date().toISOString().split('T')[0];
   const periodEnd = calcNextDueDate(today, member.plan);
+
+  // ✅ Payment record banao — tabhi revenue count hoga
   await Payment.create({
-    member_id: member._id, amount: member.fee_amount,
-    paid_date: today, period_start: today, period_end: periodEnd
+    member_id:    member._id,
+    amount:       member.fee_amount,
+    paid_date:    today,
+    period_start: today,
+    period_end:   periodEnd
   });
-  const updated = await Member.findByIdAndUpdate(memberId, { next_due_date: periodEnd }, { new: true });
+
+  // ✅ Next due date update karo
+  const updated = await Member.findByIdAndUpdate(
+    memberId,
+    { next_due_date: periodEnd },
+    { new: true }
+  );
   return {
-    ...fmt(updated), status: 'paid',
+    ...fmt(updated),
+    status: 'paid',
     message: `Fee of Rs.${member.fee_amount} marked as paid. Next due: ${periodEnd}`
   };
 }
 
 async function getDashboardStats(trainerId) {
-  const members    = (await Member.find({ trainer_id: trainerId, active: true })).map(fmt);
+  const members        = (await Member.find({ trainer_id: trainerId, active: true })).map(fmt);
   const totalMembers   = members.length;
   const activeMembers  = members.filter(m => m.status === 'paid').length;
   const pendingMembers = members.filter(m => m.status !== 'paid').length;
-  const memberIds  = members.map(m => m._id);
-  const now        = new Date();
-  const monthStr   = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
-  const monthlyPay = await Payment.find({ member_id: { $in: memberIds }, paid_date: { $regex: `^${monthStr}` } });
+  const memberIds      = members.map(m => m._id);
+
+  const now      = new Date();
+  const monthStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+
+  // ✅ Revenue sirf actual payments se — member add karne se nahi
+  const monthlyPay = await Payment.find({
+    member_id: { $in: memberIds },
+    paid_date: { $regex: `^${monthStr}` }
+  });
   const monthlyRevenue = monthlyPay.reduce((s,p) => s + p.amount, 0);
-  const recentMembers  = [...members].sort((a,b) => new Date(b.created_at) - new Date(a.created_at)).slice(0,5);
+
+  const recentMembers = [...members]
+    .sort((a,b) => new Date(b.created_at) - new Date(a.created_at))
+    .slice(0, 5);
+
   const monthlyData = [];
   for (let i = 5; i >= 0; i--) {
     const d = new Date(); d.setMonth(d.getMonth() - i);
     const key   = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
     const label = d.toLocaleString('default', { month: 'short' });
-    const pays  = await Payment.find({ member_id: { $in: memberIds }, paid_date: { $regex: `^${key}` } });
+    const pays  = await Payment.find({
+      member_id: { $in: memberIds },
+      paid_date: { $regex: `^${key}` }
+    });
     monthlyData.push({ month: label, revenue: pays.reduce((s,p) => s + p.amount, 0) });
   }
+
   return { totalMembers, activeMembers, pendingMembers, monthlyRevenue, recentMembers, monthlyData };
 }
 
