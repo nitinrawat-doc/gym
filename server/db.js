@@ -1,22 +1,42 @@
-const fs   = require('fs');
-const path = require('path');
-const bcrypt = require('bcryptjs');
+const mongoose = require('mongoose');
+const bcrypt   = require('bcryptjs');
 
-const DB_PATH = path.join(__dirname, 'truefitness.json');
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('✅ MongoDB connected!'))
+  .catch(err => console.error('❌ MongoDB error:', err));
 
-function load() {
-  if (!fs.existsSync(DB_PATH)) return { trainers: [], members: [], payments: [] };
-  try { return JSON.parse(fs.readFileSync(DB_PATH, 'utf8')); }
-  catch { return { trainers: [], members: [], payments: [] }; }
-}
+const trainerSchema = new mongoose.Schema({
+  name:       { type: String, required: true },
+  email:      { type: String, required: true, unique: true },
+  password:   { type: String, required: true },
+  created_at: { type: Date, default: Date.now }
+});
 
-function save(data) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf8');
-}
+const memberSchema = new mongoose.Schema({
+  trainer_id:    { type: mongoose.Schema.Types.ObjectId, ref: 'Trainer', required: true },
+  name:          { type: String, required: true },
+  phone:         { type: String, required: true },
+  plan:          { type: String, enum: ['monthly','quarterly','yearly'], required: true },
+  fee_amount:    { type: Number, required: true },
+  joining_date:  { type: String, required: true },
+  next_due_date: { type: String, required: true },
+  active:        { type: Boolean, default: true },
+  created_at:    { type: Date, default: Date.now }
+});
 
-function nextId(arr) {
-  return arr.length === 0 ? 1 : Math.max(...arr.map(x => x.id)) + 1;
-}
+const paymentSchema = new mongoose.Schema({
+  member_id:    { type: mongoose.Schema.Types.ObjectId, ref: 'Member', required: true },
+  amount:       { type: Number, required: true },
+  paid_date:    { type: String, required: true },
+  period_start: { type: String, required: true },
+  period_end:   { type: String, required: true },
+  notes:        { type: String, default: '' },
+  created_at:   { type: Date, default: Date.now }
+});
+
+const Trainer = mongoose.model('Trainer', trainerSchema);
+const Member  = mongoose.model('Member',  memberSchema);
+const Payment = mongoose.model('Payment', paymentSchema);
 
 function calcNextDueDate(fromDate, plan) {
   const d = new Date(fromDate);
@@ -35,142 +55,123 @@ function computeStatus(nextDueDate) {
   return 'paid';
 }
 
-function findTrainerByEmail(email) {
-  return load().trainers.find(t => t.email === email.toLowerCase().trim()) || null;
+function fmt(m) {
+  const obj = m.toObject ? m.toObject() : m;
+  return { ...obj, id: obj._id, status: computeStatus(obj.next_due_date) };
 }
 
-function getMembers(trainerId, { search, status } = {}) {
-  let list = load().members.filter(m => m.trainer_id === trainerId && m.active);
-  if (search) {
-    const s = search.toLowerCase();
-    list = list.filter(m => m.name.toLowerCase().includes(s) || m.phone.includes(s));
+async function seedTrainer() {
+  const exists = await Trainer.findOne({ email: 'trainer@truefitness.com' });
+  if (!exists) {
+    await Trainer.create({
+      name: 'Rahul Sharma',
+      email: 'trainer@truefitness.com',
+      password: bcrypt.hashSync('trainer123', 10)
+    });
+    console.log('✅ Default trainer created → trainer@truefitness.com / trainer123');
   }
-  list = list.map(m => ({ ...m, status: computeStatus(m.next_due_date) }));
-  if (status && status !== 'all') list = list.filter(m => m.status === status);
-  return list.reverse();
+}
+seedTrainer();
+
+async function findTrainerByEmail(email) {
+  return await Trainer.findOne({ email: email.toLowerCase().trim() });
 }
 
-function getMemberById(id, trainerId) {
-  const db = load();
-  const m  = db.members.find(m => m.id === Number(id) && m.trainer_id === trainerId && m.active);
+async function getMembers(trainerId, { search, status } = {}) {
+  const query = { trainer_id: trainerId, active: true };
+  if (search) query.$or = [
+    { name:  { $regex: search, $options: 'i' } },
+    { phone: { $regex: search, $options: 'i' } }
+  ];
+  let members = await Member.find(query).sort({ created_at: -1 });
+  members = members.map(fmt);
+  if (status && status !== 'all') members = members.filter(m => m.status === status);
+  return members;
+}
+
+async function getMemberById(id, trainerId) {
+  const m = await Member.findOne({ _id: id, trainer_id: trainerId, active: true });
   if (!m) return null;
-  const payments = db.payments.filter(p => p.member_id === m.id).reverse();
-  return { ...m, status: computeStatus(m.next_due_date), payments };
+  const payments = await Payment.find({ member_id: id }).sort({ paid_date: -1 });
+  return { ...fmt(m), payments: payments.map(p => ({ ...p.toObject(), id: p._id })) };
 }
 
-function createMember(trainerId, data) {
-  const db = load();
-  const member = {
-    id:            nextId(db.members),
+async function createMember(trainerId, data) {
+  const member = await Member.create({
     trainer_id:    trainerId,
     name:          data.name.trim(),
     phone:         data.phone.trim(),
     plan:          data.plan,
     fee_amount:    Number(data.fee_amount),
     joining_date:  data.joining_date,
-    next_due_date: calcNextDueDate(data.joining_date, data.plan),
-    active:        true,
-    created_at:    new Date().toISOString()
-  };
-  db.members.push(member);
-  save(db);
-  return { ...member, status: computeStatus(member.next_due_date) };
+    next_due_date: calcNextDueDate(data.joining_date, data.plan)
+  });
+  return fmt(member);
 }
 
-function updateMember(id, trainerId, data) {
-  const db  = load();
-  const idx = db.members.findIndex(m => m.id === Number(id) && m.trainer_id === trainerId && m.active);
-  if (idx === -1) return null;
-  const old  = db.members[idx];
+async function updateMember(id, trainerId, data) {
+  const old = await Member.findOne({ _id: id, trainer_id: trainerId, active: true });
+  if (!old) return null;
   const plan = data.plan || old.plan;
   const next_due_date = plan !== old.plan ? calcNextDueDate(old.joining_date, plan) : old.next_due_date;
-  db.members[idx] = {
-    ...old,
-    name:          data.name        || old.name,
-    phone:         data.phone       || old.phone,
+  const updated = await Member.findByIdAndUpdate(id, {
+    name:       data.name       || old.name,
+    phone:      data.phone      || old.phone,
     plan,
-    fee_amount:    data.fee_amount != null ? Number(data.fee_amount) : old.fee_amount,
+    fee_amount: data.fee_amount != null ? Number(data.fee_amount) : old.fee_amount,
     next_due_date
-  };
-  save(db);
-  return { ...db.members[idx], status: computeStatus(db.members[idx].next_due_date) };
+  }, { new: true });
+  return fmt(updated);
 }
 
-function deleteMember(id, trainerId) {
-  const db  = load();
-  const idx = db.members.findIndex(m => m.id === Number(id) && m.trainer_id === trainerId && m.active);
-  if (idx === -1) return false;
-  db.members[idx].active = false;
-  save(db);
-  return true;
+async function deleteMember(id, trainerId) {
+  const result = await Member.findOneAndUpdate(
+    { _id: id, trainer_id: trainerId, active: true },
+    { active: false }
+  );
+  return !!result;
 }
 
-function markPaid(memberId, trainerId) {
-  const db  = load();
-  const idx = db.members.findIndex(m => m.id === Number(memberId) && m.trainer_id === trainerId && m.active);
-  if (idx === -1) return null;
-  const member    = db.members[idx];
+async function markPaid(memberId, trainerId) {
+  const member = await Member.findOne({ _id: memberId, trainer_id: trainerId, active: true });
+  if (!member) return null;
   const today     = new Date().toISOString().split('T')[0];
   const periodEnd = calcNextDueDate(today, member.plan);
-  db.payments.push({
-    id:           nextId(db.payments),
-    member_id:    member.id,
-    amount:       member.fee_amount,
-    paid_date:    today,
-    period_start: today,
-    period_end:   periodEnd,
-    notes:        '',
-    created_at:   new Date().toISOString()
+  await Payment.create({
+    member_id: member._id, amount: member.fee_amount,
+    paid_date: today, period_start: today, period_end: periodEnd
   });
-  db.members[idx].next_due_date = periodEnd;
-  db.members[idx].status = 'paid';
-  save(db);
-  return { ...db.members[idx], status: 'paid', message: `Fee of Rs.${member.fee_amount} marked as paid. Next due: ${periodEnd}` };
+  const updated = await Member.findByIdAndUpdate(memberId, { next_due_date: periodEnd }, { new: true });
+  return {
+    ...fmt(updated), status: 'paid',
+    message: `Fee of Rs.${member.fee_amount} marked as paid. Next due: ${periodEnd}`
+  };
 }
 
-function getDashboardStats(trainerId) {
-  const db      = load();
-  const members = db.members
-    .filter(m => m.trainer_id === trainerId && m.active)
-    .map(m => ({ ...m, status: computeStatus(m.next_due_date) }));
+async function getDashboardStats(trainerId) {
+  const members    = (await Member.find({ trainer_id: trainerId, active: true })).map(fmt);
   const totalMembers   = members.length;
   const activeMembers  = members.filter(m => m.status === 'paid').length;
   const pendingMembers = members.filter(m => m.status !== 'paid').length;
-  const now       = new Date();
-  const monthStr  = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
-  const memberIds = members.map(m => m.id);
-  const monthlyRevenue = db.payments
-    .filter(p => memberIds.includes(p.member_id) && p.paid_date.startsWith(monthStr))
-    .reduce((sum, p) => sum + p.amount, 0);
-  const recentMembers = [...members]
-    .sort((a,b) => new Date(b.created_at) - new Date(a.created_at))
-    .slice(0,5);
+  const memberIds  = members.map(m => m._id);
+  const now        = new Date();
+  const monthStr   = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  const monthlyPay = await Payment.find({ member_id: { $in: memberIds }, paid_date: { $regex: `^${monthStr}` } });
+  const monthlyRevenue = monthlyPay.reduce((s,p) => s + p.amount, 0);
+  const recentMembers  = [...members].sort((a,b) => new Date(b.created_at) - new Date(a.created_at)).slice(0,5);
   const monthlyData = [];
   for (let i = 5; i >= 0; i--) {
     const d = new Date(); d.setMonth(d.getMonth() - i);
     const key   = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
     const label = d.toLocaleString('default', { month: 'short' });
-    const revenue = db.payments
-      .filter(p => memberIds.includes(p.member_id) && p.paid_date.startsWith(key))
-      .reduce((sum,p) => sum + p.amount, 0);
-    monthlyData.push({ month: label, revenue });
+    const pays  = await Payment.find({ member_id: { $in: memberIds }, paid_date: { $regex: `^${key}` } });
+    monthlyData.push({ month: label, revenue: pays.reduce((s,p) => s + p.amount, 0) });
   }
   return { totalMembers, activeMembers, pendingMembers, monthlyRevenue, recentMembers, monthlyData };
 }
 
-// Seed default trainer
-(function seed() {
-  const db = load();
-  if (!db.trainers.find(t => t.email === 'trainer@truefitness.com')) {
-    db.trainers.push({
-      id: 1, name: 'Rahul Sharma',
-      email: 'trainer@truefitness.com',
-      password: bcrypt.hashSync('trainer123', 10),
-      created_at: new Date().toISOString()
-    });
-    save(db);
-    console.log('Default trainer created: trainer@truefitness.com / trainer123');
-  }
-})();
-
-module.exports = { findTrainerByEmail, getMembers, getMemberById, createMember, updateMember, deleteMember, markPaid, getDashboardStats };
+module.exports = {
+  findTrainerByEmail, getMembers, getMemberById,
+  createMember, updateMember, deleteMember,
+  markPaid, getDashboardStats
+};
